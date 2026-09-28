@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+*.tmp
+
+# Local runtime state (regenerated)
+presentbell_config.json
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec
