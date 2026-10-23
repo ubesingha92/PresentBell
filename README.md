@@ -183,3 +183,7 @@ for the updated app; an existing executable must be rebuilt using the command ab
 
 Run `python -m unittest discover -s tests` for configuration, display scaling,
 and timer/bell regression checks.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
