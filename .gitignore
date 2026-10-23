@@ -10,3 +10,15 @@ presentbell_config.json
 build/
 dist/
 *.spec
+
+# Private presentation build and validation artifacts
+.template-build/
+.cover-build/
+.lion-build/
+.master-build/
+.preview/
+output/
+
+# Local PowerPoint presentations and templates
+*.pptx
+*.potx

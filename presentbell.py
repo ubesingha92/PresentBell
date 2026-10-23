@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """PresentBell: stdlib-only presentation timer with web remote.
 
-Timer window: borderless always-on-top top-center countdown.
-Web UI: LAN + localhost on port 8765 with per-run 6-digit password.
+Timer window: borderless always-on-top ASBIRES countdown at top-right.
+Web UI: LAN + localhost on port 8765 with a configurable password.
 See PROJECT.md for settled decisions.
 """
 from __future__ import annotations
@@ -12,7 +12,6 @@ import hmac
 import http.server
 import json
 import math
-import secrets
 import socket
 import socketserver
 import sys
@@ -22,12 +21,23 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 DEFAULT_PORT = 8765
+DEFAULT_PASSWORD = "asdf1234"
 DEFAULT_PRESENTATION_SECONDS = 600
 DEFAULT_QA_SECONDS = 300
 WARNING_SECONDS = 120
 QA_WARNING_SECONDS = 120
-WINDOW_WIDTH = 260
-WINDOW_HEIGHT = 64
+DEFAULT_STYLE = {
+    "background": "#0D3549",
+    "foreground": "#FFFFFF",
+    "accent": "#F66A17",
+    "font_family": "Arial",
+    "time_font_size": 20,
+    "phase_font_size": 8,
+    "width": 130,
+    "height": 40,
+    "margin_right": 32,
+    "margin_top": 6,
+}
 MIN_DURATION = 10
 MAX_DURATION = 10800
 BELL_FILENAME = "bell.mp3"
@@ -76,11 +86,6 @@ def parse_duration(text: str) -> int | None:
     if total < MIN_DURATION or total > MAX_DURATION:
         return None
     return total
-
-
-def generate_password() -> str:
-    """Per-run 6-digit console-only password."""
-    return f"{secrets.randbelow(900000) + 100000:06d}"
 
 
 def get_lan_ips() -> list[str]:
@@ -257,6 +262,8 @@ class BellState:
         self.display_indices: list[int] = [0]
         self.monitors: list[dict] = []
         self.quit_requested = False
+        self.style = dict(DEFAULT_STYLE)
+        self.password = DEFAULT_PASSWORD
 
     def _remaining_locked(self) -> float:
         if self.phase == "presentation" or self.phase == "qa":
@@ -412,6 +419,8 @@ class BellState:
         with self._lock:
             return {
                 "_comments": CONFIG_COMMENTS,
+                "style": dict(self.style),
+                "password": self.password,
                 "presentation_duration": self.presentation_duration,
                 "qa_duration": self.qa_duration,
                 "warning_seconds": self.warning_seconds,
@@ -440,6 +449,8 @@ class BellState:
 
 # Config file (presentbell_config.json): the only way to change settings.
 CONFIG_COMMENTS = {
+    "password": "Web remote login password. Restart after editing.",
+    "style": "ASBIRES appearance; sizes are pixels on a 1280x720 slide, scaled per display. Restart after editing. Defaults fit the PPTX timer area.",
     "presentation_duration": "seconds (600 = 10:00, range 10-10800)",
     "qa_duration": "seconds (300 = 5:00, range 10-10800)",
     "warning_seconds": "presentation remaining-mark bell at this many seconds left",
@@ -490,6 +501,27 @@ def apply_config(state: BellState, data: dict) -> None:
         _flag(data.get("bell_qa_warning"), True),
         _flag(data.get("bell_pres_warning"), True),
     )
+    password = data.get("password")
+    if isinstance(password, str) and password and password.isascii():
+        state.password = password
+    style = data.get("style", {})
+    if isinstance(style, dict):
+        for key in ("background", "foreground", "accent"):
+            value = style.get(key)
+            if (isinstance(value, str) and len(value) == 7 and value[0] == "#"
+                    and all(c in "0123456789abcdefABCDEF" for c in value[1:])):
+                state.style[key] = value
+        family = style.get("font_family")
+        if isinstance(family, str) and family.strip():
+            state.style["font_family"] = family.strip()
+        for key, low, high in (
+            ("time_font_size", 12, 80), ("phase_font_size", 8, 30),
+            ("width", 120, 400), ("height", 40, 180),
+            ("margin_right", 0, 200), ("margin_top", 0, 200),
+        ):
+            value = style.get(key)
+            if type(value) is int and low <= value <= high:
+                state.style[key] = value
     idx = data.get("display_index")
     if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
         state.display_indices = [idx]
@@ -540,10 +572,10 @@ button{{font-size:18px;padding:10px 16px;margin-top:12px}}
 .err{{color:#a00}}
 </style></head><body><main>
 <h1>PresentBell</h1>
-<p>Enter the 6-digit password shown in the operator console.</p>
+<p>Enter the password shown in the operator console.</p>
 {err}
 <form method="post" action="/login">
-<input type="password" name="password" inputmode="numeric" autocomplete="off" maxlength="6" autofocus>
+<input type="password" name="password" autocomplete="off" autofocus>
 <button type="submit">Sign in</button>
 </form></main></body></html>"""
 
@@ -585,7 +617,7 @@ footer{position:fixed;left:0;right:0;bottom:0;background:#fff;border-top:1px sol
 <button onclick="post('/api/hide')">Hide</button>
 <button onclick="if(confirm('Quit PresentBell?'))post('/api/quit')">Quit</button>
 </div>
-<footer>Developed by Chanaka Chathuranga · <a href="https://github.com/ubesingha92/PresentBell" target="_blank" rel="noopener">GitHub repo</a></footer>
+<footer>Developed by Ubesingha · <a href="https://github.com/ubesingha92/PresentBell" target="_blank" rel="noopener">GitHub repo</a></footer>
 <script>
 async function fetchStatus(){
   const r = await fetch('/api/status', {credentials:'same-origin'});
@@ -608,9 +640,9 @@ setInterval(fetchStatus, 1000);
 </script></main></body></html>"""
 
 
-# HTTP server (threaded, single cookie authed by per-run password).
+# HTTP server (threaded, single cookie authenticated by configured password).
 class PresentBellServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    """HTTP server carrying shared state and the run password."""
+    """HTTP server carrying shared state and the configured password."""
 
     daemon_threads = True
     allow_reuse_address = True
@@ -750,11 +782,15 @@ CONFIG_PATH = app_dir() / CONFIG_FILENAME
 
 
 # Timer window (tkinter): borderless always-on-top, mirrored per config.
-def top_center_geometry(monitor: dict) -> str:
-    """WxH geometry string pinned to a monitor's top-center."""
-    x = monitor["left"] + max(0, (monitor["width"] - WINDOW_WIDTH) // 2)
-    y = monitor["top"]
-    return f"{WINDOW_WIDTH}x{WINDOW_HEIGHT}+{x}+{y}"
+def timer_bounds(monitor: dict, style: dict) -> tuple[int, int, int, int, float]:
+    """Match a centered, full-screen 16:9 slide, including letterboxing."""
+    scale = min(monitor["width"] / 1280, monitor["height"] / 720)
+    slide_left = monitor["left"] + (monitor["width"] - 1280 * scale) / 2
+    slide_top = monitor["top"] + (monitor["height"] - 720 * scale) / 2
+    width, height = round(style["width"] * scale), round(style["height"] * scale)
+    x = round(slide_left + (1280 - style["margin_right"] - style["width"]) * scale)
+    y = round(slide_top + style["margin_top"] * scale)
+    return x, y, width, height, scale
 
 
 def resolve_display_indices(indices: list[int], n_monitors: int) -> list[int]:
@@ -772,24 +808,63 @@ def run_timer_window(state: BellState) -> None:
 
     root = tk.Tk()
     root.title("PresentBell")
-    root.configure(bg="white")
+    style = state.style
+    root.configure(bg=style["background"])
     root.overrideredirect(True)
     root.attributes("-topmost", True)
     root.resizable(False, False)
 
-    phase_font = tkfont.Font(size=9)
-    time_font = tkfont.Font(size=32, weight="bold")
-
     def make_labels(parent):
         pv = tk.StringVar(value="Ready")
         tv = tk.StringVar(value=format_remaining(DEFAULT_PRESENTATION_SECONDS))
-        tk.Label(
-            parent, textvariable=pv, bg="white", fg="black", font=phase_font
-        ).pack(pady=(2, 0))
-        tk.Label(
-            parent, textvariable=tv, bg="white", fg="black", font=time_font
-        ).pack()
+        accent = tk.Frame(parent, bg=style["accent"])
+        phase = tk.Label(parent, textvariable=pv, bg=style["background"],
+                         fg=style["foreground"], borderwidth=0)
+        timer = tk.Label(parent, textvariable=tv, bg=style["background"],
+                         fg=style["foreground"], borderwidth=0)
+        parent._timer_parts = (accent, phase, timer)
         return pv, tv
+
+    def place_window(win, monitor):
+        x, y, width, height, scale = timer_bounds(monitor, style)
+        win.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        # Tk treats negative geometry offsets as distances from the right/bottom.
+        # Win32 coordinates place mirrored windows correctly on left/top monitors.
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+            win.update_idletasks()
+            user32 = ctypes.windll.user32
+            user32.GetParent.argtypes = [wintypes.HWND]
+            user32.GetParent.restype = wintypes.HWND
+            user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_int, wintypes.UINT]
+            hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+            user32.SetWindowPos(hwnd, -1, x, y, width, height, 0x0010)
+        accent, phase, timer = win._timer_parts
+        pad = max(2, round(4 * scale))
+        strip = max(2, round(2 * scale))
+        phase_height = round(height * 0.30)
+        accent.place(x=0, y=height-strip, width=width, height=strip)
+        phase.place(x=pad, y=pad, width=width-2*pad, height=phase_height)
+        timer.place(x=pad, y=pad+phase_height, width=width-2*pad,
+                    height=height-phase_height-pad-strip)
+        fonts = []
+        for label, key, weight, samples, available_h in (
+            (phase, "phase_font_size", "normal", PHASE_LABELS.values(), phase_height),
+            (timer, "time_font_size", "bold", ("00:00", "3:00:00"),
+             height-phase_height-pad-strip),
+        ):
+            size = max(1, round(style[key] * scale))
+            font = tkfont.Font(family=style["font_family"], size=-size, weight=weight)
+            while size > 1 and (max(font.measure(t) for t in samples) > width-2*pad
+                                or font.metrics("linespace") > available_h):
+                size -= 1
+                font.configure(size=-size)
+            label.configure(font=font)
+            fonts.append(font)
+        win._timer_fonts = fonts
 
     phase_var, time_var = make_labels(root)
 
@@ -814,7 +889,7 @@ def run_timer_window(state: BellState) -> None:
     def make_window() -> tk.Toplevel:
         top = tk.Toplevel(root)
         top.title("PresentBell")
-        top.configure(bg="white")
+        top.configure(bg=style["background"])
         top.overrideredirect(True)
         top.attributes("-topmost", True)
         top.resizable(False, False)
@@ -833,9 +908,9 @@ def run_timer_window(state: BellState) -> None:
             if i != idxs[0] and i not in extra:
                 top = make_window()
                 extra[i] = (top,) + make_labels(top)
-        root.geometry(top_center_geometry(state.monitors[idxs[0]]))
+        place_window(root, state.monitors[idxs[0]])
         for i, (top, _pv, _tv) in extra.items():
-            top.geometry(top_center_geometry(state.monitors[i]))
+            place_window(top, state.monitors[i])
 
     def all_vars():
         yield phase_var, time_var
@@ -900,7 +975,7 @@ def main() -> int:
     state.monitors = get_monitors_ctypes()
     config_created = ensure_config(state, CONFIG_PATH)
 
-    password = generate_password()
+    password = state.password
     server = PresentBellServer(("0.0.0.0", args.port), Handler, state, password)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -910,8 +985,8 @@ def main() -> int:
     print(f"Local:  http://localhost:{args.port}")
     for ip in lan_ips:
         print(f"LAN:    http://{ip}:{args.port}")
-    print(f"Password (console only, per run): {password}")
-    print("Timer: top-center of selected display. Web Quit exits.")
+    print(f"Password: {password}")
+    print("Timer: ASBIRES top-right, scaled to a centered 16:9 slideshow. Web Quit exits.")
     if config_created:
         print(
             f"Settings: {CONFIG_FILENAME} created with defaults"
@@ -920,14 +995,14 @@ def main() -> int:
     else:
         print(
             f"Settings: {CONFIG_FILENAME} loaded"
-            " (edit while stopped to change durations/bells)."
+            " (edit while stopped to change durations/bells/style/password)."
         )
     if not BELL_PATH.is_file():
         print(
             f"Warning: {BELL_FILENAME} missing;"
             f" {WAV_FALLBACK_FILENAME} fallback or beep will be used."
         )
-    print(f"Displays found: {len(state.monitors) if state.monitors else 1} (picker in web UI).")
+    print(f"Displays found: {len(state.monitors) if state.monitors else 1}. Select displays using display_index in {CONFIG_FILENAME}.")
 
     try:
         run_timer_window(state)
